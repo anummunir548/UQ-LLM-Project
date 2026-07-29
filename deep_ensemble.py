@@ -124,6 +124,78 @@ def ensemble_predict(models, input_ids, attention_mask):
     }
 
 
+@torch.no_grad()
+def evaluate_ensemble_streaming(checkpoint_paths, test_loader, device):
+    """
+    Memory-efficient alternative to loading all N ensemble members at
+    once. Loads ONE checkpoint at a time, runs it over the full test
+    set, accumulates running sums, then frees that model before
+    loading the next. Peak memory stays roughly the size of ONE model,
+    regardless of how many ensemble members there are -- important on
+    memory-constrained machines (e.g. free-tier Codespaces) where
+    holding 5 full transformer models in RAM simultaneously can crash
+    the process.
+
+    Returns the same dict shape as ensemble_predict, computed over the
+    WHOLE test set in one go (not per-batch), since we need every
+    model's output on every example before we can average across
+    models.
+    """
+    import gc
+    from baseline_model import build_model
+
+    sum_probs = None
+    sum_sq_probs = None
+    n_models = len(checkpoint_paths)
+    all_labels = None
+
+    for m_idx, ckpt_path in enumerate(checkpoint_paths, start=1):
+        print(f"  Loading member {m_idx}/{n_models}: {ckpt_path}")
+        model = build_model()
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        model.to(device)
+        model.eval()
+
+        batch_probs = []
+        batch_labels = []
+        for batch in test_loader:
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            probs = F.softmax(outputs.logits, dim=1).cpu()
+            batch_probs.append(probs)
+            if m_idx == 1:
+                batch_labels.append(batch["labels"])
+
+        member_probs = torch.cat(batch_probs, dim=0)  # [n_test, num_classes]
+        if m_idx == 1:
+            all_labels = torch.cat(batch_labels, dim=0)
+            sum_probs = member_probs.clone()
+            sum_sq_probs = member_probs ** 2
+        else:
+            sum_probs += member_probs
+            sum_sq_probs += member_probs ** 2
+
+        # Explicitly free this model before loading the next one --
+        # this is the key line that keeps peak memory low.
+        del model
+        gc.collect()
+
+    mean = sum_probs / n_models
+    # variance = E[X^2] - (E[X])^2, the standard identity -- avoids
+    # needing to keep every member's raw predictions in memory at once.
+    variance = (sum_sq_probs / n_models) - mean ** 2
+    std = variance.clamp(min=0).sqrt()
+
+    eps = 1e-12
+    entropy = -(mean * torch.log(mean + eps)).sum(dim=1)
+
+    return {
+        "mean": mean,
+        "std": std,
+        "entropy": entropy,
+        "labels": all_labels,
+    }
 """
 Exercise (Phase 3)
 -------------------

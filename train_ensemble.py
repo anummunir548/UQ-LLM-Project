@@ -26,7 +26,7 @@ import torch
 import config
 from dataset import load_train_test
 from preprocessing import get_tokenizer, make_dataloader
-from deep_ensemble import train_single_member, ensemble_predict
+from deep_ensemble import train_single_member, evaluate_ensemble_streaming
 
 N_ENSEMBLE_MEMBERS = 5
 SEEDS = [0, 1, 2, 3, 4]
@@ -42,7 +42,7 @@ def main():
     train_loader = make_dataloader(train_texts, train_labels, tokenizer, shuffle=True)
     test_loader = make_dataloader(test_texts, test_labels, tokenizer, shuffle=False)
 
-    models = []
+    checkpoint_paths = []
     for i, seed in enumerate(SEEDS[:N_ENSEMBLE_MEMBERS], start=1):
         print(f"\n=== Training ensemble member {i}/{N_ENSEMBLE_MEMBERS} (seed={seed}) ===")
         model = train_single_member(train_loader, test_loader, seed=seed)
@@ -50,30 +50,35 @@ def main():
         ckpt_path = f"{ENSEMBLE_CHECKPOINT_DIR}/member_{i}.pt"
         torch.save(model.state_dict(), ckpt_path)
         print(f"  Saved {ckpt_path}")
+        checkpoint_paths.append(ckpt_path)
 
-        models.append(model)
+        # Free this model (and its training-time gradients) from memory
+        # before starting the next one -- prevents peak RAM from
+        # growing with every additional member, which is what was
+        # crashing the process around member 3.
+        del model
+        import gc
+        gc.collect()
 
     # --- Evaluate the ensemble as a whole over the test set ---
+    # Uses evaluate_ensemble_streaming: loads ONE checkpoint at a time
+    # instead of holding all N models in memory simultaneously.
     print(f"\nEvaluating {N_ENSEMBLE_MEMBERS}-model ensemble over {len(test_texts)} test examples ...")
 
+    out = evaluate_ensemble_streaming(checkpoint_paths, test_loader, config.DEVICE)
+    preds = out["mean"].argmax(dim=1)
+    labels = out["labels"]
+
     results = []
-    for batch_idx, batch in enumerate(test_loader):
-        input_ids = batch["input_ids"].to(config.DEVICE)
-        attention_mask = batch["attention_mask"].to(config.DEVICE)
-        labels = batch["labels"]
-
-        out = ensemble_predict(models, input_ids, attention_mask)
-        preds = out["mean"].argmax(dim=1).cpu()
-
-        for i in range(len(labels)):
-            results.append({
-                "true_label": int(labels[i]),
-                "predicted_label": int(preds[i]),
-                "correct": bool(preds[i] == labels[i]),
-                "mean_prob": out["mean"][i].cpu().tolist(),
-                "std": out["std"][i].cpu().tolist(),
-                "entropy": float(out["entropy"][i].cpu()),
-            })
+    for i in range(len(labels)):
+        results.append({
+            "true_label": int(labels[i]),
+            "predicted_label": int(preds[i]),
+            "correct": bool(preds[i] == labels[i]),
+            "mean_prob": out["mean"][i].tolist(),
+            "std": out["std"][i].tolist(),
+            "entropy": float(out["entropy"][i]),
+        })
 
     accuracy = sum(r["correct"] for r in results) / len(results)
     avg_entropy = sum(r["entropy"] for r in results) / len(results)
