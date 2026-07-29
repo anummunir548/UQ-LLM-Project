@@ -35,11 +35,12 @@ from baseline_model import build_model
 from evaluate import evaluate
 
 
-def train_one_epoch(model, loader, optimizer):
+def train_one_epoch(model, loader, optimizer, log_every=10):
     model.train()
     total_loss = 0.0
+    n_batches = len(loader)
 
-    for batch in loader:
+    for step, batch in enumerate(loader, start=1):
         batch = {k: v.to(config.DEVICE) for k, v in batch.items()}
 
         optimizer.zero_grad()
@@ -56,7 +57,13 @@ def train_one_epoch(model, loader, optimizer):
 
         total_loss += loss.item()
 
-    return total_loss / len(loader)
+        # Print progress every `log_every` batches so the terminal never
+        # sits silent for the whole epoch -- this is what tells you the
+        # run is alive vs actually stuck.
+        if step % log_every == 0 or step == n_batches:
+            print(f"    batch {step}/{n_batches} - loss: {loss.item():.4f}")
+
+    return total_loss / n_batches
 
 
 def main():
@@ -73,14 +80,22 @@ def main():
     optimizer = AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
 
     for epoch in range(1, config.EPOCHS + 1):
+        print(f"\n--- Epoch {epoch}/{config.EPOCHS} ---")
         avg_loss = train_one_epoch(model, train_loader, optimizer)
         print(f"Epoch {epoch}/{config.EPOCHS} - train loss: {avg_loss:.4f}")
 
         metrics = evaluate(model, test_loader, config.DEVICE)
         print(f"  test accuracy: {metrics['accuracy']:.4f}")
 
-    torch.save(model.state_dict(), config.BASELINE_CHECKPOINT)
-    print(f"\nSaved checkpoint to {config.BASELINE_CHECKPOINT}")
+        # Save after EVERY epoch, not just at the end. If you stop the
+        # run (or the Codespace disconnects) partway through, you keep
+        # whatever the most recently completed epoch produced instead
+        # of losing the whole run. Each save overwrites the previous
+        # one, so disk usage stays constant.
+        torch.save(model.state_dict(), config.BASELINE_CHECKPOINT)
+        print(f"  Saved checkpoint (after epoch {epoch}) to {config.BASELINE_CHECKPOINT}")
+
+    print(f"\nTraining complete. Final checkpoint at {config.BASELINE_CHECKPOINT}")
 
     # Also save the tokenizer alongside the checkpoint so evaluate.py /
     # mc_dropout.py never have to guess which tokenizer config was used.

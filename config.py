@@ -28,13 +28,13 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # toxicity, misinformation, etc). Binary classification keeps every
 # downstream UQ method (entropy, ECE, Brier score) simple to compute
 # and simple to explain in a paper.
-DATASET_NAME = "imdb"          # placeholder: swap for your real dataset
+DATASET_NAME = "stanfordnlp/imdb"          # placeholder: swap for your real dataset
 TEXT_COLUMN = "text"
 LABEL_COLUMN = "label"
 NUM_CLASSES = 2
 
-N_TRAIN_SAMPLES = 4000          # keep small while iterating on code
-N_TEST_SAMPLES = 1000
+N_TRAIN_SAMPLES = 200          # keep small while iterating on code
+N_TEST_SAMPLES = 50
 TEST_SIZE = 0.2
 
 # ---------------------------------------------------------------------
